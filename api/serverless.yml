@@ -1,0 +1,543 @@
+service: paywall
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: us-east-1
+  memorySize: 256
+  timeout: 30
+  environment:
+    STAGE: ${self:provider.stage}
+    TENANTS_TABLE: ${self:service}-tenants-${self:provider.stage}
+    PRODUCTS_TABLE: ${self:service}-products-${self:provider.stage}
+    API_KEYS_TABLE: ${self:service}-api-keys-${self:provider.stage}
+    ENTITLEMENT_CACHE_TABLE: ${self:service}-entitlement-cache-${self:provider.stage}
+    WEBHOOK_AUDIT_TABLE: ${self:service}-webhook-audit-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - !GetAtt TenantsTable.Arn
+            - !GetAtt ProductsTable.Arn
+            - !GetAtt ApiKeysTable.Arn
+            - !GetAtt EntitlementCacheTable.Arn
+            - !GetAtt WebhookAuditTable.Arn
+            - !Sub "${ApiKeysTable.Arn}/index/*"
+            - !Sub "${EntitlementCacheTable.Arn}/index/*"
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+            - secretsmanager:PutSecretValue
+            - secretsmanager:DeleteSecret
+            - secretsmanager:CreateSecret
+          Resource:
+            - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:paywall/stripe/*"
+
+plugins:
+  - serverless-dotenv-plugin
+  - serverless-esbuild
+
+custom:
+  # Domain configuration
+  certificateArn: arn:aws:acm:us-east-1:479831562791:certificate/b3115a11-666e-4dcf-87e2-80a710129cbf
+  checkoutDomain: pay.agentbrigade.ai
+  apiDomain: pay-api.agentbrigade.ai
+
+  esbuild:
+    bundle: true
+    minify: true
+    sourcemap: false
+    exclude:
+      - aws-sdk
+    target: node20
+    platform: node
+
+functions:
+  # ==========================================
+  # TENANT MANAGEMENT (Admin API key auth)
+  # ==========================================
+
+  createTenant:
+    handler: src/handlers/tenants.createHandler
+    events:
+      - http:
+          path: /tenants
+          method: post
+          cors: true
+
+  getTenant:
+    handler: src/handlers/tenants.getHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}
+          method: get
+          cors: true
+
+  updateTenant:
+    handler: src/handlers/tenants.updateHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}
+          method: put
+          cors: true
+
+  deleteTenant:
+    handler: src/handlers/tenants.deleteHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}
+          method: delete
+          cors: true
+
+  # ==========================================
+  # CREDENTIALS — BYOC (Admin API key auth)
+  # ==========================================
+
+  setCredentials:
+    handler: src/handlers/credentials.setHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/credentials
+          method: post
+          cors: true
+
+  getCredentialsStatus:
+    handler: src/handlers/credentials.getStatusHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/credentials
+          method: get
+          cors: true
+
+  deleteCredentials:
+    handler: src/handlers/credentials.deleteHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/credentials
+          method: delete
+          cors: true
+
+  # ==========================================
+  # PRODUCTS (Admin API key auth)
+  # ==========================================
+
+  createProduct:
+    handler: src/handlers/products.createHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/products
+          method: post
+          cors: true
+
+  listProducts:
+    handler: src/handlers/products.listHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/products
+          method: get
+          cors: true
+
+  getProduct:
+    handler: src/handlers/products.getHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/products/{productId}
+          method: get
+          cors: true
+
+  updateProduct:
+    handler: src/handlers/products.updateHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/products/{productId}
+          method: put
+          cors: true
+
+  deleteProduct:
+    handler: src/handlers/products.deleteHandler
+    events:
+      - http:
+          path: /tenants/{tenantId}/products/{productId}
+          method: delete
+          cors: true
+
+  # ==========================================
+  # ENTITLEMENTS (Product API key auth)
+  # ==========================================
+
+  checkEntitlement:
+    handler: src/handlers/entitlements.checkHandler
+    events:
+      - http:
+          path: /entitlements/check
+          method: post
+          cors: true
+
+  # ==========================================
+  # PLANS (Public — tenant/product in query)
+  # ==========================================
+
+  getPlans:
+    handler: src/handlers/plans.handler
+    events:
+      - http:
+          path: /plans
+          method: get
+          cors: true
+
+  # ==========================================
+  # CHECKOUT (Public — tenant context in body)
+  # ==========================================
+
+  createSetupIntent:
+    handler: src/handlers/checkout.createSetupIntentHandler
+    events:
+      - http:
+          path: /checkout/setup-intent
+          method: post
+          cors: true
+
+  # ==========================================
+  # SUBSCRIPTIONS
+  # ==========================================
+
+  finalizeSubscription:
+    handler: src/handlers/subscriptions.finalizeHandler
+    events:
+      - http:
+          path: /subscriptions/finalize
+          method: post
+          cors: true
+
+  cancelSubscription:
+    handler: src/handlers/subscriptions.cancelHandler
+    events:
+      - http:
+          path: /subscriptions/cancel
+          method: post
+          cors: true
+
+  listSubscriptions:
+    handler: src/handlers/subscriptions.listHandler
+    events:
+      - http:
+          path: /subscriptions
+          method: get
+          cors: true
+
+  # ==========================================
+  # WEBHOOKS (Stripe — per-tenant URL)
+  # ==========================================
+
+  stripeWebhook:
+    handler: src/handlers/webhooks.handler
+    events:
+      - http:
+          path: /webhooks/stripe/{tenantId}
+          method: post
+          cors: false
+
+resources:
+  Resources:
+    # ==========================================
+    # DynamoDB Tables
+    # ==========================================
+
+    # Tenants — one record per tenant
+    TenantsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.TENANTS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: tenantId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantId
+            KeyType: HASH
+
+    # Products — per-tenant product registrations
+    ProductsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.PRODUCTS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: tenantId
+            AttributeType: S
+          - AttributeName: productId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantId
+            KeyType: HASH
+          - AttributeName: productId
+            KeyType: RANGE
+
+    # API Keys — hashed keys for auth lookup
+    ApiKeysTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.API_KEYS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: apiKeyHash
+            AttributeType: S
+          - AttributeName: tenantId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: apiKeyHash
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: tenant-index
+            KeySchema:
+              - AttributeName: tenantId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    # Entitlement Cache — fast access check with TTL
+    EntitlementCacheTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.ENTITLEMENT_CACHE_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: tenantProductKey
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantProductKey
+            KeyType: HASH
+          - AttributeName: userId
+            KeyType: RANGE
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    # Webhook Audit — idempotency + audit trail with TTL
+    WebhookAuditTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.WEBHOOK_AUDIT_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: tenantEventKey
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantEventKey
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    # ==========================================
+    # S3 Bucket — Checkout Frontend Static Files
+    # ==========================================
+
+    CheckoutBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-checkout-${self:provider.stage}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    CheckoutBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref CheckoutBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+              Action: s3:GetObject
+              Resource: !Sub "${CheckoutBucket.Arn}/*"
+
+    # ==========================================
+    # CloudFront — Checkout Frontend CDN + SSL
+    # ==========================================
+
+    CloudFrontOAI:
+      Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+      Properties:
+        CloudFrontOriginAccessIdentityConfig:
+          Comment: OAI for ${self:service}-${self:provider.stage} checkout
+
+    CheckoutDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          Comment: ${self:service}-${self:provider.stage} checkout frontend
+          Aliases:
+            - ${self:custom.checkoutDomain}
+          ViewerCertificate:
+            AcmCertificateArn: ${self:custom.certificateArn}
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          DefaultRootObject: index.html
+          Origins:
+            - Id: S3Origin
+              DomainName: !GetAtt CheckoutBucket.RegionalDomainName
+              S3OriginConfig:
+                OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOAI}"
+            - Id: ApiOrigin
+              DomainName: !Sub "${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com"
+              OriginPath: /${self:provider.stage}
+              CustomOriginConfig:
+                HTTPSPort: 443
+                OriginProtocolPolicy: https-only
+          DefaultCacheBehavior:
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: none
+          CacheBehaviors:
+            # Route /api/* to API Gateway
+            - PathPattern: /plans*
+              TargetOriginId: ApiOrigin
+              ViewerProtocolPolicy: redirect-to-https
+              AllowedMethods:
+                - GET
+                - HEAD
+                - OPTIONS
+                - PUT
+                - PATCH
+                - POST
+                - DELETE
+              CachedMethods:
+                - GET
+                - HEAD
+              ForwardedValues:
+                QueryString: true
+                Headers:
+                  - X-Api-Key
+                  - Content-Type
+                  - Authorization
+                Cookies:
+                  Forward: none
+              DefaultTTL: 0
+              MinTTL: 0
+              MaxTTL: 0
+            - PathPattern: /checkout/*
+              TargetOriginId: ApiOrigin
+              ViewerProtocolPolicy: redirect-to-https
+              AllowedMethods:
+                - GET
+                - HEAD
+                - OPTIONS
+                - PUT
+                - PATCH
+                - POST
+                - DELETE
+              CachedMethods:
+                - GET
+                - HEAD
+              ForwardedValues:
+                QueryString: true
+                Headers:
+                  - X-Api-Key
+                  - Content-Type
+                  - Authorization
+                Cookies:
+                  Forward: none
+              DefaultTTL: 0
+              MinTTL: 0
+              MaxTTL: 0
+            - PathPattern: /subscriptions*
+              TargetOriginId: ApiOrigin
+              ViewerProtocolPolicy: redirect-to-https
+              AllowedMethods:
+                - GET
+                - HEAD
+                - OPTIONS
+                - PUT
+                - PATCH
+                - POST
+                - DELETE
+              CachedMethods:
+                - GET
+                - HEAD
+              ForwardedValues:
+                QueryString: true
+                Headers:
+                  - X-Api-Key
+                  - Content-Type
+                  - Authorization
+                Cookies:
+                  Forward: none
+              DefaultTTL: 0
+              MinTTL: 0
+              MaxTTL: 0
+          # SPA fallback — return index.html for all 404s (React Router handles routing)
+          CustomErrorResponses:
+            - ErrorCode: 403
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+              ErrorCachingMinTTL: 10
+            - ErrorCode: 404
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+              ErrorCachingMinTTL: 10
+
+    # ==========================================
+    # API Gateway Custom Domain
+    # ==========================================
+
+    ApiCustomDomain:
+      Type: AWS::ApiGateway::DomainName
+      Properties:
+        DomainName: ${self:custom.apiDomain}
+        CertificateArn: ${self:custom.certificateArn}
+        EndpointConfiguration:
+          Types:
+            - EDGE
+
+    ApiBasePathMapping:
+      Type: AWS::ApiGateway::BasePathMapping
+      DependsOn: ApiCustomDomain
+      Properties:
+        DomainName: ${self:custom.apiDomain}
+        RestApiId: !Ref ApiGatewayRestApi
+        Stage: ${self:provider.stage}
+
+  Outputs:
+    ApiEndpoint:
+      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}"
+    ApiCustomDomainEndpoint:
+      Value: https://${self:custom.apiDomain}
+    ApiCustomDomainTarget:
+      Description: CNAME target for pay-api.agentbrigade.ai in GoDaddy
+      Value: !GetAtt ApiCustomDomain.DistributionDomainName
+    CheckoutUrl:
+      Value: https://${self:custom.checkoutDomain}
+    CheckoutCloudFrontDomain:
+      Description: CNAME target for pay.agentbrigade.ai in GoDaddy
+      Value: !GetAtt CheckoutDistribution.DomainName
+    CheckoutBucketName:
+      Value: !Ref CheckoutBucket
