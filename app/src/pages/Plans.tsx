@@ -47,7 +47,7 @@ export default function Plans() {
       price_id: plan.price_id,
       return_url: returnUrl,
     });
-    navigate(`/checkout?${params.toString()}`);
+    navigate(`/pay?${params.toString()}`);
   }
 
   if (loading) {

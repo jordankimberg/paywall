@@ -78,7 +78,7 @@ export async function checkHandler(
 
     return success({
       has_access: false,
-      checkout_url: `${checkoutDomain}/plans?${params.toString()}`,
+      checkout_url: `${checkoutDomain}/subscribe?${params.toString()}`,
     });
   } catch (err) {
     console.error('Error checking entitlement:', err);

@@ -95,30 +95,47 @@ async function queryStripeEntitlement(
 
   const customer = customers.data[0];
 
-  // List active subscriptions
-  const subscriptions = await stripe.subscriptions.list({
-    customer: customer.id,
-    status: 'active',
-    expand: ['data.items.data.price.product'],
-  });
+  // List active + trialing subscriptions (no deep expansion — Stripe caps at 4 levels)
+  const [activeSubs, trialingSubs] = await Promise.all([
+    stripe.subscriptions.list({ customer: customer.id, status: 'active' }),
+    stripe.subscriptions.list({ customer: customer.id, status: 'trialing' }),
+  ]);
 
-  // Also check trialing
-  const trialingSubs = await stripe.subscriptions.list({
-    customer: customer.id,
-    status: 'trialing',
-    expand: ['data.items.data.price.product'],
-  });
+  const allSubs = [...activeSubs.data, ...trialingSubs.data];
+  if (allSubs.length === 0) return { hasAccess: false };
 
-  const allSubs = [...subscriptions.data, ...trialingSubs.data];
+  // Collect unique product IDs from all subscription items
+  const productIds = new Set<string>();
+  for (const sub of allSubs) {
+    for (const item of sub.items.data) {
+      const prodId = typeof item.price.product === 'string'
+        ? item.price.product
+        : (item.price.product as Stripe.Product).id;
+      productIds.add(prodId);
+    }
+  }
+
+  // Batch-fetch all referenced Stripe products
+  const products = await Promise.all(
+    Array.from(productIds).map((id) => stripe.products.retrieve(id))
+  );
+  const productMap = new Map(products.map((p) => [p.id, p]));
 
   // Find a subscription matching this product's audience
   for (const sub of allSubs) {
     for (const item of sub.items.data) {
-      const stripeProduct = item.price.product as Stripe.Product;
-      // Match if the Stripe product's audience metadata matches this productId,
-      // or if there's no audience filter (single-product tenant)
+      const prodId = typeof item.price.product === 'string'
+        ? item.price.product
+        : (item.price.product as Stripe.Product).id;
+      const stripeProduct = productMap.get(prodId);
+      if (!stripeProduct) continue;
+      // Match only if the Stripe product's audience metadata includes this productId.
+      // Supports comma-separated audiences for bundles (e.g. "compass_admin,doctor").
+      // Products without an audience tag do NOT match — they must be explicitly tagged.
       const audience = stripeProduct.metadata?.audience;
-      if (!audience || audience === productId) {
+      if (!audience) continue;
+      const audiences = audience.split(',').map((a) => a.trim());
+      if (audiences.includes(productId)) {
         return {
           hasAccess: true,
           subscriptionId: sub.id,
