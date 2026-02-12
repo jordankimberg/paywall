@@ -6,10 +6,16 @@ interface PlanCardProps {
 }
 
 export default function PlanCard({ plan, onSelect }: PlanCardProps) {
+  function formatInterval(interval: string, count: number): string {
+    if (count === 1) return interval;
+    if (count === 3 && interval === 'month') return 'quarter';
+    return `${count} ${interval}s`;
+  }
+
   const priceDisplay =
     plan.amount_cents === 0
       ? 'Free'
-      : `$${(plan.amount_cents / 100).toFixed(2)}/${plan.interval}`;
+      : `$${(plan.amount_cents / 100).toFixed(2)}/${formatInterval(plan.interval, plan.interval_count)}`;
 
   return (
     <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm hover:shadow-md transition-shadow">
